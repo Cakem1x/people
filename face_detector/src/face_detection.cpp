@@ -150,6 +150,7 @@ public:
   // This could be replaced by visualization markers, but they can't be modified
   // in rviz at runtime (eg the alpha, display time, etc. can't be changed.)
   ros::Publisher cloud_pub_;
+  ros::Publisher image_vis_pub_;
   ros::Publisher pos_array_pub_;
 
   // Display
@@ -296,12 +297,16 @@ public:
 
     // Connection callbacks and advertise
     ros::SubscriberStatusCallback pos_pub_connect_cb = boost::bind(&FaceDetector::connectCb, this);
+    ros::SubscriberStatusCallback image_vis_pub_connect_cb = boost::bind(&FaceDetector::connectCb, this);
     ros::SubscriberStatusCallback cloud_pub_connect_cb = boost::bind(&FaceDetector::connectCb, this);
     if (do_continuous_)
       ROS_INFO_STREAM_NAMED("face_detector", "You must subscribe to one of FaceDetector's outbound topics or else it will not publish anything.");
 
     {
       boost::mutex::scoped_lock lock(connect_mutex_);
+      
+      // Advertise the visualization of the faces on a rgb image stream
+      image_vis_pub_ = nh_.advertise<sensor_msgs::Image>("face_detector/faces_video",1, image_vis_pub_connect_cb, image_vis_pub_connect_cb);
 
       // Advertise a position measure message.
       pos_array_pub_ = nh_.advertise<people_msgs::PositionMeasurementArray>("face_detector/people_tracker_measurements_array", 1, pos_pub_connect_cb, pos_pub_connect_cb);
@@ -341,7 +346,7 @@ public:
     boost::mutex::scoped_lock lock(connect_mutex_);
     if (use_rgbd_)
     {
-      if (do_continuous_ && cloud_pub_.getNumSubscribers() == 0 && pos_array_pub_.getNumSubscribers() == 0)
+      if (do_continuous_ && cloud_pub_.getNumSubscribers() == 0 && pos_array_pub_.getNumSubscribers() == 0 && image_vis_pub_.getNumSubscribers() == 0)
       {
         ROS_INFO_STREAM_NAMED("face_detector", "You have unsubscribed to FaceDetector's outbound topics, so it will no longer publish anything.");
         image_sub_.unsubscribe();
@@ -365,7 +370,7 @@ public:
     }
     else
     {
-      if (do_continuous_ && cloud_pub_.getNumSubscribers() == 0 && pos_array_pub_.getNumSubscribers() == 0)
+      if (do_continuous_ && cloud_pub_.getNumSubscribers() == 0 && pos_array_pub_.getNumSubscribers() == 0 && image_vis_pub_.getNumSubscribers() == 0)
       {
         ROS_INFO_STREAM_NAMED("face_detector", "You have unsubscribed to FaceDetector's outbound topics, so it will no longer publish anything.");
         image_sub_.unsubscribe();
@@ -488,7 +493,7 @@ public:
     ros::Duration diffdetect = endtdetect - starttdetect;
     ROS_INFO_STREAM_NAMED("face_detector", "Detection duration = " << diffdetect.toSec() << "sec");
 
-    matchAndDisplay(faces_vector, image->header);
+    matchAndDisplay(cv_image_ptr, faces_vector, image->header);
   }
 
   /*!
@@ -536,13 +541,13 @@ public:
     ros::Duration diffdetect = endtdetect - starttdetect;
     ROS_INFO_STREAM_NAMED("face_detector", "Detection duration = " << diffdetect.toSec() << "sec");
 
-    matchAndDisplay(faces_vector, image->header);
+    matchAndDisplay(cv_image_ptr, faces_vector, image->header);
   }
 
 
 private:
 
-  void matchAndDisplay(vector<Box2D3D> faces_vector, std_msgs::Header header)
+  void matchAndDisplay(cv_bridge::CvImageConstPtr cv_image_ptr, vector<Box2D3D> faces_vector, std_msgs::Header header)
   {
     bool found_faces = false;
 
@@ -550,6 +555,13 @@ private:
     sensor_msgs::PointCloud cloud;
     cloud.header.stamp = header.stamp;
     cloud.header.frame_id = header.frame_id;
+
+    // The CvImage which will be used for the 2D (rgb) visualization of the currently detected images
+    cv_bridge::CvImage* rect_image_ptr;
+    if (image_vis_pub_.getNumSubscribers() >= 0)
+    {
+      rect_image_ptr = new cv_bridge::CvImage(*cv_image_ptr);
+    }
 
     if (faces_vector.size() > 0)
     {
@@ -704,6 +716,7 @@ private:
 
       for (uint iface = 0; iface < faces_vector.size(); iface++)
       {
+        cv::Scalar color = cv::Scalar(255, 0, 0);
         one_face = &faces_vector[iface];
 
         // Visualization of good faces as a point cloud
@@ -718,6 +731,16 @@ private:
           cloud.channels[0].values.push_back(1.0f);
 
           ngood ++;
+
+          // set the rectangle color to green
+          color = cv::Scalar(0,255,0);
+        }
+        if (image_vis_pub_.getNumSubscribers() >= 0)
+        {
+          // Draw rectangle
+          cv::rectangle(rect_image_ptr->image, 
+          cv::Point(one_face->box2d.x,one_face->box2d.y), 
+          cv::Point(one_face->box2d.x+one_face->box2d.width, one_face->box2d.y+one_face->box2d.height), color, 4);
         }
       }
 
@@ -743,6 +766,12 @@ private:
     if (!do_continuous_ && found_faces)
     {
       as_.setSucceeded(result_);
+    }
+    // Publish the image for the 2D (rgb) visualization
+    if (image_vis_pub_.getNumSubscribers() >= 0) 
+    {
+      image_vis_pub_.publish(rect_image_ptr->toImageMsg());
+      delete rect_image_ptr;
     }
   }
 
